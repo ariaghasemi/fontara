@@ -11,6 +11,37 @@ import {
   withChromeMv3ExtensionHarness
 } from "../support/browser/extension-harness.mjs"
 
+test("Chrome browser clicks wait for moving controls without repeating activation", async (t) => {
+  await withChromeMv3ExtensionHarness(t, async (harness) => {
+    const page = await harness.createFixturePage()
+    await page.evaluate(async () => {
+      const button = document.createElement("button")
+      button.dataset.testid = "fontara-moving-control"
+      button.textContent = "Moving control"
+      button.style.cssText =
+        "position:fixed;top:20px;left:20px;width:160px;height:60px;z-index:2147483647"
+      document.body.append(button)
+      const movement = button.animate(
+        { transform: ["translateX(0px)", "translateX(200px)"] },
+        { duration: 500, fill: "forwards" }
+      )
+      window.__fontaraMovingControlClicks = []
+      button.addEventListener("click", (event) => {
+        window.__fontaraMovingControlClicks.push({
+          trusted: event.isTrusted,
+          movement: movement.playState
+        })
+      })
+      await movement.ready
+    })
+    await clickByTestId(page, "fontara-moving-control")
+    assert.deepEqual(
+      await page.evaluate(() => window.__fontaraMovingControlClicks),
+      [{ trusted: true, movement: "finished" }]
+    )
+  })
+})
+
 async function openProfiles(page) {
   await clickByTestId(page, "fontara-options-nav-sites")
   await clickByTestId(page, "fontara-sites-tab-profiles")

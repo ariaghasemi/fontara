@@ -15,6 +15,8 @@ This project follows a practical release-note format:
 - Restored Firefox stable/beta browser tests after extension-page input
   restrictions changed. The harness uses geckodriver for trusted clicks and
   uploads, with a checksum-verified driver installation in CI.
+- Stabilized Chrome browser tests around animated mobile font pickers and
+  asynchronously populated font menus while preserving trusted user input.
 - Raised the desktop browser minimums to Chrome/Chromium 130 and Firefox 140
   ESR and derived JavaScript build targets from the manifests. UI CSS transforms
   remain enabled in all builds, including browser-test builds. Firefox for

@@ -2064,7 +2064,7 @@ export async function clickSelector(page, selector) {
     element.scrollIntoView({ block: "center", inline: "center" })
   })
 
-  const point = await waitFor(
+  await waitFor(
     () =>
       page.$eval(selector, (element) => {
         const rect = element.getBoundingClientRect()
@@ -2086,8 +2086,15 @@ export async function clickSelector(page, selector) {
   )
 
   const firefoxDriver = getFirefoxDriver(page)
-  if (firefoxDriver) await firefoxDriver.click(page, selector)
-  else await page.mouse.click(point.x, point.y)
+  if (firefoxDriver) {
+    await firefoxDriver.click(page, selector)
+  } else {
+    // Drawer animations can move the target after the hit test. The locator
+    // waits for stable bounds and uses the element's current click coordinates.
+    // Foreground the page so its animation frames can run before clicking.
+    await page.bringToFront()
+    await page.locator(selector).setTimeout(10_000).click()
+  }
 }
 
 /**
