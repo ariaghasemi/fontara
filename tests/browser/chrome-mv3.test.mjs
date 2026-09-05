@@ -2049,6 +2049,11 @@ test("Chrome MV3 popup and options UI update current-site include/exclude lists"
       })
     )
 
+    await waitForInputChecked(
+      popupPage,
+      "fontara-current-site-toggle-input",
+      false
+    )
     await activateByTestId(popupPage, "fontara-current-site-toggle")
     await waitForExtensionLocalValue(popupPage, STORAGE_KEYS.DISABLED_FOR, [])
     await waitForExtensionLocalValue(popupPage, STORAGE_KEYS.ENABLED_FOR, [
