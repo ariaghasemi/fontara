@@ -138,10 +138,28 @@ test("Chrome MV3 a delayed Google profile save preserves profiles changed during
       '[data-testid="fontara-site-profile-row-example.com"] button[aria-label*="Edit"]'
     )
     await clickByTestId(page, "fontara-site-profile-font-select")
-    await clickByTestId(
-      page,
+    const robotoOptionTestId =
       "fontara-site-profile-font-option-google-font:Roboto"
+    await page.waitForSelector(`[data-testid="${robotoOptionTestId}"]`)
+    // Radix preserves the focused item when its scroll buttons mount. Use
+    // typeahead so scrolling the long catalog and moving focus happen together.
+    await page.keyboard.type("Roboto")
+    await page.waitForFunction(
+      (testId) =>
+        document.activeElement?.getAttribute("data-testid") === testId,
+      {},
+      robotoOptionTestId
     )
+    await page.keyboard.press("Enter")
+    await page.waitForFunction(() => {
+      const select = document.querySelector(
+        '[data-testid="fontara-site-profile-font-select"]'
+      )
+      return (
+        select?.getAttribute("aria-expanded") === "false" &&
+        select.textContent === "Roboto"
+      )
+    })
     // Hold the preparation acknowledgment at the transport boundary. The UI
     // race is independent of the font network/cache implementation.
     await page.evaluate(() => {

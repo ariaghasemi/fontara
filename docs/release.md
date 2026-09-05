@@ -51,8 +51,10 @@ FONTARA_FIREFOX_BROWSER_TESTS=1 FONTARA_FIREFOX_HEADLESS=1 pnpm test:browser:pro
 ```
 
 Run these with desktop Chrome/Chromium 130 or newer and Firefox 140 ESR or newer;
-`CHROME_PATH` and `FIREFOX_PATH` select a particular installed binary. The
-required CI matrix covers both minimum versions and current stable releases.
+`CHROME_PATH` and `FIREFOX_PATH` select a particular installed binary. Firefox
+tests also require geckodriver on `PATH` or at `GECKODRIVER_PATH`; see
+[browser test setup](testing.md#browser-tests). The required CI matrix covers
+both minimum versions and current stable releases.
 The separate nightly/manual matrix adds beta and current ESR coverage.
 
 Firefox for Android has an installation minimum of 142. Android device

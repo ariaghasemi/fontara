@@ -9,6 +9,8 @@ import { promisify } from "node:util"
 
 import puppeteer from "puppeteer-core"
 
+import { getFirefoxDriver, launchFirefoxDriver } from "./firefox-driver.mjs"
+
 const execFileAsync = promisify(execFile)
 
 export const ROOT_DIR = path.resolve(import.meta.dirname, "../../..")
@@ -955,20 +957,6 @@ export function createTestServer(options = {}) {
   return listenTestServer(server)
 }
 
-async function getFreePort() {
-  const server = http.createServer()
-
-  return new Promise((resolve, reject) => {
-    server.once("error", reject)
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address()
-      assert.equal(typeof address, "object")
-      const port = address.port
-      server.close(() => resolve(port))
-    })
-  })
-}
-
 export async function waitFor(check, options = {}) {
   const {
     interval = 100,
@@ -1153,24 +1141,12 @@ async function launchFirefoxWithExtension(extensionDir) {
     "Run pnpm debug:firefox before this browser test."
   )
 
-  const userDataDir = await fs.mkdtemp(
-    path.join(os.tmpdir(), "fontara-browser-firefox-")
-  )
-  const remoteDebuggingPort = await getFreePort()
-  const browser = await puppeteer.launch({
-    args: [
-      `--remote-debugging-port=${remoteDebuggingPort}`,
-      // Firefox 153+ treats moz-extension:// pages as privileged navigation.
-      // Explicitly grant the local WebDriver BiDi test session access so the
-      // harness can open the installed extension's own options page.
-      "--remote-allow-system-access"
-    ],
-    browser: "firefox",
-    defaultViewport: BROWSER_VIEWPORTS.desktop,
-    executablePath: firefoxPath,
+  // Firefox 155+ disallows BiDi input in extension processes. Share one
+  // geckodriver-owned session: BiDi observes pages, Classic sends trusted input.
+  const { browser, userDataDir, close } = await launchFirefoxDriver({
+    firefoxPath,
     headless: process.env.FONTARA_FIREFOX_HEADLESS === "1",
-    protocol: "webDriverBiDi",
-    userDataDir
+    viewport: BROWSER_VIEWPORTS.desktop
   })
 
   try {
@@ -1184,10 +1160,9 @@ async function launchFirefoxWithExtension(extensionDir) {
       `moz-extension://${extensionId}`
     await delay(1000)
 
-    return { browser, extensionBaseUrl, extensionId, userDataDir }
+    return { browser, extensionBaseUrl, extensionId, userDataDir, close }
   } catch (error) {
-    await browser.close().catch(() => {})
-    await fs.rm(userDataDir, { force: true, recursive: true })
+    await close()
     throw error
   }
 }
@@ -1230,10 +1205,16 @@ async function withExtensionHarness(testContext, launchBrowser, callback) {
       server
     })
   } finally {
-    await browser.close().catch(() => {})
-    await server?.close()
-    await crossOriginServer?.close()
-    await fs.rm(userDataDir, { force: true, recursive: true })
+    try {
+      if (launchResult.close) await launchResult.close()
+      else await browser.close().catch(() => {})
+    } finally {
+      await Promise.all([
+        server?.close(),
+        crossOriginServer?.close(),
+        fs.rm(userDataDir, { force: true, recursive: true })
+      ])
+    }
   }
 }
 
@@ -2074,7 +2055,10 @@ ${JSON.stringify(lastValue, null, 2)}`
 }
 
 export async function clickByTestId(page, testId) {
-  const selector = testIdSelector(testId)
+  await clickSelector(page, testIdSelector(testId))
+}
+
+export async function clickSelector(page, selector) {
   await page.waitForSelector(selector, { visible: true })
   await page.$eval(selector, (element) => {
     element.scrollIntoView({ block: "center", inline: "center" })
@@ -2097,11 +2081,13 @@ export async function clickByTestId(page, testId) {
         return { x, y }
       }),
     {
-      message: `Element ${testId} did not become clickable.`
+      message: `Element ${selector} did not become clickable.`
     }
   )
 
-  await page.mouse.click(point.x, point.y)
+  const firefoxDriver = getFirefoxDriver(page)
+  if (firefoxDriver) await firefoxDriver.click(page, selector)
+  else await page.mouse.click(point.x, point.y)
 }
 
 /**
@@ -2176,6 +2162,11 @@ export async function uploadFileByTestId(page, testId, filePath) {
 export async function uploadFilesByTestId(page, testId, filePaths) {
   const selector = testIdSelector(testId)
   await page.waitForSelector(selector)
+  const firefoxDriver = getFirefoxDriver(page)
+  if (firefoxDriver) {
+    await firefoxDriver.uploadFiles(page, selector, filePaths)
+    return
+  }
   const input = await page.$(selector)
   assert.ok(input, `Input ${testId} was not found.`)
   await input.uploadFile(...filePaths)

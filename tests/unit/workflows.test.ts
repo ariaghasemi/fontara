@@ -18,6 +18,7 @@ type Workflow = {
         matrix: { include: Array<{ browser: string; version: string }> }
       }
       steps?: Array<{
+        if?: string
         uses?: string
         run?: string
         with?: Record<string, unknown>
@@ -29,6 +30,27 @@ type Workflow = {
 function readWorkflow(name: string): string {
   return fs.readFileSync(path.resolve(".github/workflows", name), "utf8")
 }
+
+test("every Firefox browser lane installs geckodriver before running tests", () => {
+  for (const name of ["verify.yml", "browser-tests.yml"]) {
+    const workflow = load(readWorkflow(name))
+    const jobs = Object.values(workflow.jobs).filter((job) =>
+      job.strategy?.matrix.include.some((entry) => entry.browser === "firefox")
+    )
+    assert.ok(jobs.length > 0, `${name} must include Firefox coverage`)
+    for (const job of jobs) {
+      const steps = job.steps ?? []
+      const installIndex = steps.findIndex(
+        (step) => step.uses === "./.github/actions/setup-geckodriver"
+      )
+      const testIndex = steps.findIndex((step) =>
+        step.run?.includes("pnpm test:browser:firefox")
+      )
+      assert.ok(installIndex >= 0 && installIndex < testIndex, name)
+      assert.equal(steps[installIndex].if, "matrix.browser == 'firefox'")
+    }
+  }
+})
 
 test("CI, release, and browser workflows use native build checks without Plasmo publish actions", () => {
   const ci = readWorkflow("ci.yml")

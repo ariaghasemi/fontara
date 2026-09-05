@@ -50,6 +50,9 @@ pnpm test:browser:chrome
 
 Firefox:
 
+Install [geckodriver](https://github.com/mozilla/geckodriver/releases) on `PATH`
+or set `GECKODRIVER_PATH` to its executable (CI uses version 0.37.1).
+
 ```sh
 FONTARA_FIREFOX_BROWSER_TESTS=1 FONTARA_FIREFOX_HEADLESS=1 pnpm test:browser:firefox
 ```
@@ -61,6 +64,11 @@ reloads.
 Use desktop Chrome 130 or newer and Firefox 140 ESR or newer. Set `CHROME_PATH` or
 `FIREFOX_PATH` to select a specific installed binary; an old cached browser below
 the manifest minimum cannot load the extension.
+
+Firefox tests use one geckodriver session: Puppeteer connects through WebDriver
+BiDi for inspection, while WebDriver Classic sends trusted clicks and file
+uploads. This preserves user activation for optional permissions on extension
+pages, where recent Firefox versions restrict BiDi input commands.
 
 Firefox for Android requires version 142 or newer to install. The current
 matrix runs desktop browsers and does not include Android device validation.
@@ -163,7 +171,8 @@ nightly coverage across:
 - Firefox ESR
 
 The nightly channel matrix supplements the stable/minimum checks required by
-normal CI and releases.
+normal CI and releases. Both workflows install geckodriver from Mozilla's
+versioned release archive and verify its SHA-256 checksum before execution.
 
 ## Package Lint
 
