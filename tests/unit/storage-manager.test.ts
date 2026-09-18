@@ -5,7 +5,8 @@ import {
   ensureStorageValues,
   flushPendingSettingsSync,
   mergeWebsiteLists,
-  normalizeCustomFontList
+  normalizeCustomFontList,
+  registerSettingsSyncListeners
 } from "../../src/background/storage-manager"
 import { FONTARA_TEXT_UNICODE_RANGE } from "../../src/config/font-unicode-range"
 import { getActiveWebsiteSitePatterns } from "../../src/config/site-list"
@@ -18,7 +19,10 @@ import {
   CUSTOM_FONT_STORAGE_SCHEMA_VERSION_KEY
 } from "../../src/utils/custom-font-storage"
 import { createGoogleFontValue } from "../../src/utils/google-fonts"
-import { FONTARA_SETTINGS_UPDATED_AT_KEY } from "../../src/utils/settings-sync"
+import {
+  FONTARA_SETTINGS_UPDATED_AT_KEY,
+  FONTARA_SYNC_STORAGE_CHUNK_META_KEY
+} from "../../src/utils/settings-sync"
 import { createSystemFontValue } from "../../src/utils/system-fonts"
 
 const originalChrome = Reflect.get(globalThis, "chrome") as unknown
@@ -1277,6 +1281,171 @@ test("flushPendingSettingsSync mirrors fresh local settings before a service wor
 
   assert.deepEqual(syncValues[STORAGE_KEYS.ENABLED_FOR], ["127.0.0.1:3000"])
   assert.equal(syncValues[STORAGE_KEYS.SELECTED_FONT], "Samim-Fontara")
+})
+
+test("a delayed sync flush never publishes a stale local snapshot over newer local state", async () => {
+  const localValues: Record<string, unknown> = {
+    [STORAGE_KEYS.CUSTOM_FONT_LIST]: [],
+    [STORAGE_KEYS.ENABLED_FOR]: ["127.0.0.1:3000"],
+    [STORAGE_KEYS.SELECTED_FONT]: "Samim-Fontara",
+    [STORAGE_KEYS.SYNC_SETTINGS]: true,
+    [FONTARA_SETTINGS_UPDATED_AT_KEY]: 10
+  }
+  const syncValues: Record<string, unknown> = {
+    [STORAGE_KEYS.ENABLED_FOR]: [],
+    [STORAGE_KEYS.SELECTED_FONT]: DEFAULT_VALUES.SELECTED_FONT,
+    [STORAGE_KEYS.SYNC_SETTINGS]: true,
+    [FONTARA_SETTINGS_UPDATED_AT_KEY]: 1
+  }
+  mockExtensionStorage(localValues, syncValues)
+
+  // A flush is pending (scheduled by an earlier local write). Before it
+  // fires, a newer local mutation lands (a user edit or a merged remote
+  // state). The flush must serialize local storage at write time.
+  localValues[STORAGE_KEYS.TEXT_STROKE] = 0.8
+  localValues[FONTARA_SETTINGS_UPDATED_AT_KEY] = 20
+
+  await flushPendingSettingsSync()
+
+  assert.deepEqual(syncValues[STORAGE_KEYS.ENABLED_FOR], ["127.0.0.1:3000"])
+  assert.equal(syncValues[STORAGE_KEYS.TEXT_STROKE], 0.8)
+  assert.equal(syncValues[FONTARA_SETTINGS_UPDATED_AT_KEY], 20)
+})
+
+test("a sync area that fails to read keeps the sync preference and local state untouched", async () => {
+  const syncListeners: Array<
+    (changes: Record<string, unknown>, areaName: string) => void
+  > = []
+  let lastError: { message: string } | null = null
+  const localValues: Record<string, unknown> = {
+    [STORAGE_KEYS.CUSTOM_FONT_LIST]: [],
+    [STORAGE_KEYS.SELECTED_FONT]: "Samim-Fontara",
+    [STORAGE_KEYS.SYNC_SETTINGS]: true,
+    [FONTARA_SETTINGS_UPDATED_AT_KEY]: 7
+  }
+  const localSetCalls: Array<Record<string, unknown>> = []
+
+  Reflect.set(globalThis, "chrome", {
+    runtime: {
+      get lastError() {
+        return lastError
+      }
+    },
+    storage: {
+      local: {
+        get(
+          key: string | Record<string, unknown>,
+          callback: (items: Record<string, unknown>) => void
+        ) {
+          if (typeof key === "string") {
+            callback({ [key]: localValues[key] })
+            return
+          }
+
+          callback({ ...key, ...localValues })
+        },
+        set(items: Record<string, unknown>, callback: () => void) {
+          localSetCalls.push({ ...items })
+          Object.assign(localValues, items)
+          callback()
+        }
+      },
+      sync: {
+        QUOTA_BYTES_PER_ITEM: 8192,
+        get(_key: null, callback: (items: Record<string, unknown>) => void) {
+          lastError = { message: "sync storage temporarily unavailable" }
+          callback({})
+          lastError = null
+        },
+        set(_items: Record<string, unknown>, callback: () => void) {
+          callback()
+        },
+        remove(_keys: string | string[], callback: () => void) {
+          callback()
+        }
+      },
+      onChanged: {
+        addListener(
+          listener: (changes: Record<string, unknown>, areaName: string) => void
+        ) {
+          syncListeners.push(listener)
+        },
+        removeListener() {}
+      }
+    }
+  })
+
+  registerSettingsSyncListeners()
+  assert.equal(syncListeners.length, 1)
+  syncListeners[0]({}, "sync")
+  await new Promise((resolve) => setTimeout(resolve, 100))
+
+  // A transient read failure is not "sync was disabled elsewhere": the
+  // preference stays on and nothing is written back to local.
+  assert.equal(localValues[STORAGE_KEYS.SYNC_SETTINGS], true)
+  assert.deepEqual(localSetCalls, [])
+})
+
+test("a partially written chunked sync area keeps local state and the sync preference at startup", async () => {
+  const localValues: Record<string, unknown> = {
+    [STORAGE_KEYS.CUSTOM_FONT_LIST]: [],
+    [STORAGE_KEYS.SELECTED_FONT]: "Samim-Fontara",
+    [STORAGE_KEYS.SYNC_SETTINGS]: true,
+    [FONTARA_SETTINGS_UPDATED_AT_KEY]: 42
+  }
+  const syncValues: Record<string, unknown> = {
+    [STORAGE_KEYS.TEXT_STROKE]: { [FONTARA_SYNC_STORAGE_CHUNK_META_KEY]: 2 }
+  }
+  mockExtensionStorage(localValues, syncValues)
+
+  await ensureStorageValues()
+
+  assert.equal(localValues[STORAGE_KEYS.SYNC_SETTINGS], true)
+  assert.equal(localValues[STORAGE_KEYS.SELECTED_FONT], "Samim-Fontara")
+  assert.equal(localValues[FONTARA_SETTINGS_UPDATED_AT_KEY], 42)
+})
+
+test("untimestamped local settings with user changes are not overwritten by a timestamped sync state", async () => {
+  const localValues: Record<string, unknown> = {
+    [STORAGE_KEYS.CUSTOM_FONT_LIST]: [],
+    [STORAGE_KEYS.TEXT_STROKE]: 0.8,
+    [STORAGE_KEYS.SELECTED_FONT]: "Samim-Fontara",
+    [STORAGE_KEYS.SYNC_SETTINGS]: true
+  }
+  const syncValues: Record<string, unknown> = {
+    [STORAGE_KEYS.TEXT_STROKE]: 0.2,
+    [STORAGE_KEYS.SELECTED_FONT]: DEFAULT_VALUES.SELECTED_FONT,
+    [STORAGE_KEYS.SYNC_SETTINGS]: true,
+    [FONTARA_SETTINGS_UPDATED_AT_KEY]: 123
+  }
+  mockExtensionStorage(localValues, syncValues)
+
+  await ensureStorageValues()
+
+  // Pre-existing local state wins over the timestamped sync payload.
+  assert.equal(localValues[STORAGE_KEYS.TEXT_STROKE], 0.8)
+  // Local is stamped with a fresh baseline and pushed to the sync area.
+  assert.ok((localValues[FONTARA_SETTINGS_UPDATED_AT_KEY] as number) > 123)
+  assert.equal(syncValues[STORAGE_KEYS.TEXT_STROKE], 0.8)
+})
+
+test("a fresh profile with default-only local state still accepts the timestamped sync state", async () => {
+  const localValues: Record<string, unknown> = {
+    [STORAGE_KEYS.CUSTOM_FONT_LIST]: []
+  }
+  const syncValues: Record<string, unknown> = {
+    [STORAGE_KEYS.TEXT_STROKE]: 0.6,
+    [STORAGE_KEYS.SELECTED_FONT]: "Samim-Fontara",
+    [STORAGE_KEYS.SYNC_SETTINGS]: true,
+    [FONTARA_SETTINGS_UPDATED_AT_KEY]: 55
+  }
+  mockExtensionStorage(localValues, syncValues)
+
+  await ensureStorageValues()
+
+  // No user divergence from the defaults: the synced state applies.
+  assert.equal(localValues[STORAGE_KEYS.TEXT_STROKE], 0.6)
+  assert.equal(localValues[STORAGE_KEYS.SELECTED_FONT], "Samim-Fontara")
 })
 
 test("ensureStorageValues initializes and normalizes the UI language preference", async () => {

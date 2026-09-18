@@ -497,7 +497,15 @@ test("options page exposes extension hotkey controls", () => {
   )
   assert.match(
     extensionSource,
-    /private static async persistSettingsChange\([\s\S]*?revision,[\s\S]*?settings: updatedSettings,[\s\S]*?syncSnapshot[\s\S]*?writeBackgroundSettingsWithSyncSnapshot\(settings\)[\s\S]*?publishSettingsChange\(updatedSettings, revision\)[\s\S]*?if \(options\.flushSync\)[\s\S]*?flushPendingSettingsSync\(syncSnapshot\)[\s\S]*?schedulePendingSettingsSync\(syncSnapshot\)[\s\S]*?return \{ revision \}/
+    /private static async persistSettingsChange\([\s\S]*?revision,[\s\S]*?settings: updatedSettings[\s\S]*?writeBackgroundSettingsWithSyncSnapshot\(settings\)[\s\S]*?publishSettingsChange\(updatedSettings, revision\)[\s\S]*?if \(options\.flushSync\)[\s\S]*?await flushPendingSettingsSync\(\)[\s\S]*?schedulePendingSettingsSync\(\)[\s\S]*?return \{ revision \}/
+  )
+  // Sync flushes must never carry a captured settings snapshot: the payload
+  // is serialized from local storage at write time so a delayed flush cannot
+  // publish state that a newer mutation, a merged sync state, or a sync
+  // toggle has already superseded.
+  assert.doesNotMatch(
+    extensionSource,
+    /flushPendingSettingsSync\([A-Za-z_$][\w$]*\)|schedulePendingSettingsSync\([A-Za-z_$][\w$]*\)/
   )
   // Settings/revision pairing is exercised with a real interleaving in
   // extension-runtime.test.ts instead of pinning the publisher's source shape.

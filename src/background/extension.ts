@@ -326,20 +326,17 @@ export class ExtensionRuntime {
     if (settings[STORAGE_KEYS.GOOGLE_FONTS_ENABLED] === false) {
       googleFontManager?.cancelPendingNetwork()
     }
-    const {
-      revision,
-      settings: updatedSettings,
-      syncSnapshot
-    } = await writeBackgroundSettingsWithSyncSnapshot(settings)
+    const { revision, settings: updatedSettings } =
+      await writeBackgroundSettingsWithSyncSnapshot(settings)
     if (settings[STORAGE_KEYS.GOOGLE_FONTS_ENABLED] === true) {
       googleFontManager?.resumeNetwork()
     }
 
     await ExtensionRuntime.publishSettingsChange(updatedSettings, revision)
     if (options.flushSync) {
-      await flushPendingSettingsSync(syncSnapshot)
+      await flushPendingSettingsSync()
     } else {
-      schedulePendingSettingsSync(syncSnapshot)
+      schedulePendingSettingsSync()
     }
 
     return { revision }

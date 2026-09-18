@@ -4,7 +4,7 @@ import {
   FONTARA_SETTINGS_UPDATED_AT_KEY,
   FONTARA_SYNCED_STORAGE_KEYS,
   getLocalStorageReadDefaults,
-  getSettingsRevision,
+  getSettingsSyncDefaults,
   getSettingsSyncReadDefaults,
   getSettingsUpdatedAt,
   hasSyncedSettingsValues,
@@ -29,9 +29,7 @@ export { mergeWebsiteLists, normalizeCustomFontList }
 const SYNC_SAVE_DELAY_MS = 3000
 
 let syncSaveTimeout: ReturnType<typeof setTimeout> | null = null
-let pendingSyncValues: Record<string, unknown> | null = null
 let applyingSyncToLocal = false
-let latestScheduledSyncRevision = 0
 let syncWriteQueue: Promise<void> = Promise.resolve()
 
 function enqueueSyncWrite(operation: () => Promise<void>): Promise<void> {
@@ -43,6 +41,31 @@ function enqueueSyncWrite(operation: () => Promise<void>): Promise<void> {
 
 function isSyncSettingsEnabled(value: unknown): boolean {
   return value !== false
+}
+
+/**
+ * A fresh profile reads every synced key as its default value (storage
+ * `get(defaults)` fills them in), while a pre-existing profile with user
+ * changes diverges from the defaults on at least one synced key. That
+ * divergence is what separates "old user state without a timestamp stamp"
+ * from "fresh install that should accept the synced state".
+ */
+function hasDivergedSyncedSettings(
+  localValues: Record<string, unknown>
+): boolean {
+  const defaults = getSettingsSyncDefaults()
+
+  return FONTARA_SYNCED_STORAGE_KEYS.some((key) => {
+    if (key === STORAGE_KEYS.SYNC_SETTINGS) {
+      return false
+    }
+    const localValue = localValues[key]
+    if (localValue === undefined) {
+      return false
+    }
+
+    return !valuesAreEqual(localValue, defaults[key])
+  })
 }
 
 function valuesAreEqual(first: unknown, second: unknown): boolean {
@@ -151,67 +174,31 @@ async function saveSyncedSettingsFromLocal(): Promise<void> {
   await saveSyncedSettings(await getLocalValues(getLocalStorageReadDefaults()))
 }
 
-export function schedulePendingSettingsSync(
-  values?: Record<string, unknown>
-): void {
-  if (values) {
-    pendingSyncValues = values
-    latestScheduledSyncRevision = Math.max(
-      latestScheduledSyncRevision,
-      getSettingsRevision(values)
-    )
-  }
-
+/**
+ * Schedules a debounced sync flush. The payload is deliberately not captured
+ * here: the flush always serializes the current local state at write time so
+ * a delayed or coalesced flush can never publish a snapshot that a newer
+ * local mutation, a merged sync state, or a sync toggle has already
+ * superseded.
+ */
+export function schedulePendingSettingsSync(): void {
   if (syncSaveTimeout !== null) {
     clearTimeout(syncSaveTimeout)
   }
 
   syncSaveTimeout = setTimeout(() => {
-    const valuesToSave = pendingSyncValues
-    pendingSyncValues = null
     syncSaveTimeout = null
-    void enqueueSyncWrite(async () => {
-      if (
-        valuesToSave &&
-        getSettingsRevision(valuesToSave) < latestScheduledSyncRevision
-      ) {
-        return
-      }
-      await (valuesToSave
-        ? saveSyncedSettings(valuesToSave)
-        : saveSyncedSettingsFromLocal())
-    })
+    void enqueueSyncWrite(() => saveSyncedSettingsFromLocal())
   }, SYNC_SAVE_DELAY_MS)
 }
 
-export async function flushPendingSettingsSync(
-  values?: Record<string, unknown>
-): Promise<void> {
+export async function flushPendingSettingsSync(): Promise<void> {
   if (syncSaveTimeout !== null) {
     clearTimeout(syncSaveTimeout)
     syncSaveTimeout = null
   }
 
-  const valuesToSave = values ?? pendingSyncValues
-  pendingSyncValues = null
-  if (valuesToSave) {
-    latestScheduledSyncRevision = Math.max(
-      latestScheduledSyncRevision,
-      getSettingsRevision(valuesToSave)
-    )
-  }
-
-  await enqueueSyncWrite(async () => {
-    if (
-      valuesToSave &&
-      getSettingsRevision(valuesToSave) < latestScheduledSyncRevision
-    ) {
-      return
-    }
-    await (valuesToSave
-      ? saveSyncedSettings(valuesToSave)
-      : saveSyncedSettingsFromLocal())
-  })
+  await enqueueSyncWrite(() => saveSyncedSettingsFromLocal())
 }
 
 function applySyncStorageToLocal(): Promise<void> {
@@ -228,17 +215,23 @@ async function applySyncStorageToLocalUnlocked(): Promise<void> {
   try {
     syncedValues = await getSyncValues(getSettingsSyncReadDefaults())
   } catch (error) {
-    logSyncError("Settings synchronization was disabled due to error.", error)
-    await saveSyncSetting(false)
+    logSyncError(
+      "Synced settings could not be read; keeping local settings until the next event.",
+      error
+    )
     return
   }
 
   if (!syncedValues) {
+    // The sync area is unreadable right now (unavailable, or holding a
+    // partially written chunked state). That is not "empty": acting on it
+    // would let a transient condition flip the user's sync preference or
+    // overwrite local state. Keep local untouched and retry on the next
+    // event; a real failure surfaces when the next sync write attempts it.
     logSyncError(
-      "Settings synchronization was disabled because synced settings are missing.",
-      new Error("sync-settings-missing")
+      "Sync storage is unreadable; keeping local settings.",
+      new Error("sync-storage-unreadable")
     )
-    await saveSyncSetting(false)
     return
   }
 
@@ -256,6 +249,30 @@ async function applySyncStorageToLocalUnlocked(): Promise<void> {
   }
 
   if (!hasSyncedSettingsValues(syncedValues)) {
+    await saveSyncedSettingsFromLocal()
+    return
+  }
+
+  // Local state that predates revisioned settings (no updatedAt stamp) but
+  // contains user changes is pre-existing state, not a fresh install: a
+  // timestamped sync payload must not overwrite it. Adopt the local state,
+  // stamp it, and push it to sync so the next comparison has a valid local
+  // baseline. A fresh profile (every synced key still at its default) keeps
+  // accepting the synced state through the merge below.
+  if (
+    getSettingsUpdatedAt(localValues) === 0 &&
+    hasDivergedSyncedSettings(localValues) &&
+    getSettingsUpdatedAt(syncedValues) > 0
+  ) {
+    applyingSyncToLocal = true
+    try {
+      await setLocalValuesIfChanged(localValues, {
+        ...localValues,
+        [FONTARA_SETTINGS_UPDATED_AT_KEY]: Date.now()
+      })
+    } finally {
+      applyingSyncToLocal = false
+    }
     await saveSyncedSettingsFromLocal()
     return
   }
@@ -310,25 +327,23 @@ async function ensureStorageValuesUnlocked(): Promise<void> {
   try {
     syncedValues = await getSyncValues(getSettingsSyncReadDefaults())
   } catch (error) {
-    logSyncError("Settings synchronization was disabled due to error.", error)
-    await setLocalValuesIfChanged(localValues, {
-      ...normalizedLocalValues,
-      [STORAGE_KEYS.SYNC_SETTINGS]: false
-    })
-    await saveSyncSetting(false)
+    logSyncError(
+      "Synced settings could not be read; keeping local settings.",
+      error
+    )
+    await setLocalValuesIfChanged(localValues, normalizedLocalValues)
     return
   }
 
   if (!syncedValues) {
+    // Unreadable (unavailable or transient partially chunked state) is not
+    // "empty". Normalize local only: never flip the sync preference or
+    // pull/push based on a transient condition.
     logSyncError(
-      "Settings synchronization was disabled because synced settings are missing.",
-      new Error("sync-settings-missing")
+      "Sync storage is unreadable; keeping local settings.",
+      new Error("sync-storage-unreadable")
     )
-    await setLocalValuesIfChanged(localValues, {
-      ...normalizedLocalValues,
-      [STORAGE_KEYS.SYNC_SETTINGS]: false
-    })
-    await saveSyncSetting(false)
+    await setLocalValuesIfChanged(localValues, normalizedLocalValues)
     return
   }
 
@@ -353,6 +368,23 @@ async function ensureStorageValuesUnlocked(): Promise<void> {
       ...(latestUpdatedAt > 0
         ? { [FONTARA_SETTINGS_UPDATED_AT_KEY]: latestUpdatedAt }
         : {})
+    })
+    await saveSyncedSettingsFromLocal()
+    return
+  }
+
+  // Same protection as the sync event path: pre-existing local state without
+  // a revision stamp must not be overwritten by a timestamped sync payload.
+  // A fresh profile (every synced key still at its default) keeps accepting
+  // the synced state through the merge below.
+  if (
+    getSettingsUpdatedAt(localValues) === 0 &&
+    hasDivergedSyncedSettings(localValues) &&
+    getSettingsUpdatedAt(syncedValues) > 0
+  ) {
+    await setLocalValuesIfChanged(localValues, {
+      ...normalizedLocalValues,
+      [FONTARA_SETTINGS_UPDATED_AT_KEY]: Date.now()
     })
     await saveSyncedSettingsFromLocal()
     return

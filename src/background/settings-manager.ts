@@ -16,7 +16,6 @@ let settingsOperationQueue: Promise<void> = Promise.resolve()
 export type BackgroundSettingsWriteResult = {
   revision: number
   settings: Record<string, unknown>
-  syncSnapshot: Record<string, unknown>
 }
 
 export type BackgroundSettingsSnapshot = {
@@ -176,12 +175,7 @@ export async function writeBackgroundSettingsWithSyncSnapshot(
 
     return {
       revision,
-      settings: normalizedValues,
-      syncSnapshot: {
-        ...normalizedValues,
-        ...settingsUpdatedAtPatch,
-        [FONTARA_SETTINGS_REVISION_KEY]: revision
-      }
+      settings: normalizedValues
     }
   })
 }
